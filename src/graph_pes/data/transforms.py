@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from typing import Callable, Literal
+from typing import Callable, Literal, TYPE_CHECKING
+if TYPE_CHECKING:
+    import ase
+
+import numpy as np
+import torch
 
 from graph_pes.atomic_graph import AtomicGraph, is_batch
 from graph_pes.utils.misc import random_rotation_matrix
@@ -43,3 +48,200 @@ def parse_transform(t: TransformName | Transform | None) -> Transform:
         return t
     else:
         raise ValueError(f"Unknown transform: {t}")
+
+class CartesianTensorConverter:
+    r"""
+    Converts per-atom rank-2 tensors between their Cartesian (3x3)
+    and irreducible spherical representations.
+
+    Parameters
+    ----------
+    formula
+        The symmetry formula for the symmetric part of the tensor.
+        Defaults to "ij=ji".
+    irreps
+        Irreducible representations to include in the spherical output,
+        in e3nn notation. Defaults to "0e+1e+2e" (9 components).
+        Examples:
+
+        - "0e+1e+2e" — full decomposition (9 components).
+        - "0e+2e" — symmetric part only (6 components).
+        - "2e" — traceless symmetric only (5 components).
+        - "1e" — antisymmetric part only (3 components).
+
+    Attributes
+    ----------
+    n_components : int
+        Number of spherical components produced by `to_spherical`
+        (determined by ``irreps``).
+    formula : str
+        The symmetry formula passed to the constructor.
+    irreps : e3nn.o3.Irreps
+        The selected irreducible representations.
+
+    Examples
+    --------
+    Magnetic shielding — full asymmetric tensor (9 components):
+
+    .. code-block:: python
+
+        converter_ms = CartesianTensorConverter(formula="ij=ji")
+        sph = converter_ms.to_spherical(T)  # shape (..., 9)
+
+    Electric field gradient — traceless symmetric tensor (5 components):
+
+    .. code-block:: python
+
+        converter_efg = CartesianTensorConverter(formula="ij=ji", irreps="2e")
+        sph = converter_efg.to_spherical(T)  # shape (..., 5)
+
+    Pre-process an :class:`ase.Atoms` trajectory before training:
+
+    .. code-block:: python
+
+        import ase.io
+        from graph_pes.data.transforms import CartesianTensorConverter
+
+        converter = CartesianTensorConverter(formula="ij=ji", irreps="2e")
+        structures = ase.io.read("trajectory.xyz", index=":")
+        for atoms in structures:
+            converter.atoms_to_spherical(atoms, key="efg")
+        ase.io.write("trajectory_sph.xyz", structures)
+    """
+
+    def __init__(self, formula: str = "ij=ji", irreps: str = "0e+1e+2e"):
+        from e3nn import o3
+        
+        lhs, rhs = formula.split("=")
+        antisymm_formula = f"{lhs}=-{rhs.lstrip('-')}"
+        indices = {i: "1o" for i in lhs.replace("-", "")}
+
+        rtp_symm = o3.ReducedTensorProducts(formula, **indices)
+        rtp_anti = o3.ReducedTensorProducts(antisymm_formula, **indices)
+
+        Q_symm = rtp_symm.change_of_basis.flatten(-2)  # (n_symm, 9)
+        Q_anti = rtp_anti.change_of_basis.flatten(-2)   # (n_anti, 9)
+
+        symm_list = list(rtp_symm.irreps_out)
+        anti_list = list(rtp_anti.irreps_out)
+        first_dim = symm_list[0].mul * symm_list[0].ir.dim
+        Q_full = torch.cat(
+            [Q_symm[:first_dim], Q_anti, Q_symm[first_dim:]], dim=0
+        )  # (9, 9)
+
+        # Map irrep label to its row indices in Q_full
+        irrep_to_rows: dict[str, list[int]] = {}
+        row = 0
+        for mul_ir in [symm_list[0]] + anti_list + symm_list[1:]:
+            dim = mul_ir.mul * mul_ir.ir.dim
+            key = str(mul_ir.ir)
+            irrep_to_rows.setdefault(key, []).extend(range(row, row + dim))
+            row += dim
+
+        requested_irreps = o3.Irreps(irreps)
+        selected: list[int] = []
+        for mul_ir in requested_irreps:
+            ir_str = str(mul_ir.ir)
+            if ir_str not in irrep_to_rows:
+                raise ValueError(
+                    f"Irrep '{ir_str}' is not part of the decomposition of "
+                    f"'{formula}'. Available: {sorted(irrep_to_rows)}"
+                )
+            if mul_ir.mul != 1:
+                raise ValueError(
+                    f"Multiplicity must be 1 for each irrep; got {mul_ir.mul}x{ir_str}"
+                )
+            selected.extend(irrep_to_rows[ir_str])
+
+        self._Q = Q_full[selected]  # (n_components, 9)
+        self.formula = formula
+        self.irreps = o3.Irreps(irreps)
+        self.n_components: int = len(selected)
+
+    def to_spherical(self, cartesian: torch.Tensor) -> torch.Tensor:
+        """
+        Convert per-atom Cartesian tensors to their irreducible spherical
+        representation.
+
+        Parameters
+        ----------
+        cartesian
+            Per-atom Cartesian tensors of shape (..., 3, 3).
+
+        Returns
+        -------
+        torch.Tensor
+            Spherical representation of shape (..., n_components), where
+            n_components determined by irreps argument passed.
+        """
+        Q = self._Q.to(device=cartesian.device, dtype=cartesian.dtype)
+        return cartesian.flatten(-2) @ Q.T
+
+    def to_cartesian(self, spherical: torch.Tensor) -> torch.Tensor:
+        """
+        Convert per-atom spherical tensors back to Cartesian representation.
+
+        Parameters
+        ----------
+        spherical
+            Per-atom spherical tensors of shape (..., n_components).
+
+        Returns
+        -------
+        torch.Tensor
+            Cartesian tensors of shape (..., 3, 3).
+        """
+        Q = self._Q.to(device=spherical.device, dtype=spherical.dtype)
+        return (spherical @ Q).view(*spherical.shape[:-1], 3, 3)
+
+    def atoms_to_spherical(
+        self, atoms: ase.Atoms, key: str, out_key: str | None = None
+    ) -> None:
+        """
+        Convert per-atom Cartesian tensor from an ase.Atoms object
+        to spherical basis and store it under a new key.
+
+        Parameters
+        ----------
+        atoms
+            ase.Atoms object to modify in-place.
+        key
+            Key in atoms.arrays holding the Cartesian tensor,
+            expected shape (N_atoms, 3, 3) or (N_atoms, 9).
+        out_key
+            Key to store the spherical representation.
+            Defaults to ``key + "_sph"``.
+        """
+        if out_key is None:
+            out_key = f"{key}_sph"
+
+        raw = atoms.arrays[key]
+        T = torch.from_numpy(raw.reshape(-1, 3, 3))
+        sph = self.to_spherical(T)
+        atoms.arrays[out_key] = sph.numpy()
+
+    def atoms_to_cartesian(
+        self, atoms: ase.Atoms, key: str, out_key: str | None = None
+    ) -> None:
+        """
+        Convert per-atom spherical tensor from a ase.Atoms 
+        object back to Cartesian basis
+
+        Parameters
+        ----------
+        atoms
+           ase.Atoms object.
+        key
+            Key in atoms.arrays` holding the spherical tensor,
+            with shape (N_atoms, 9).
+        out_key
+            Key to store the Cartesian tensor.
+            Defaults to key + "_cart".
+        """
+        if out_key is None:
+            out_key = f"{key}_cart"
+
+        raw = atoms.arrays[key]
+        sph = torch.from_numpy(raw.reshape(-1, self.n_components))
+        cart = self.to_cartesian(sph)
+        atoms.arrays[out_key] = cart.numpy().reshape(-1, 9)
