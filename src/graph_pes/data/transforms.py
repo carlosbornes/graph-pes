@@ -49,6 +49,14 @@ def parse_transform(t: TransformName | Transform | None) -> Transform:
     else:
         raise ValueError(f"Unknown transform: {t}")
 
+_KEYWORD_TO_IRREPS: dict[str, str] = {
+    "isotropic": "0e",
+    "symmetric": "0e+2e",
+    "antisymmetric": "1e",
+    "full": "0e+1e+2e",
+}
+
+
 class CartesianTensorConverter:
     r"""
     Converts per-atom rank-2 tensors between their Cartesian (3x3)
@@ -56,28 +64,22 @@ class CartesianTensorConverter:
 
     Parameters
     ----------
-    formula
-        The symmetry formula for the symmetric part of the tensor.
-        Defaults to "ij=ji".
     irreps
-        Irreducible representations to include in the spherical output,
-        in e3nn notation. Defaults to "0e+1e+2e" (9 components).
-        Examples:
+        Which irreducible components to use. Accepts either a keyword
+        or e3nn irreps notation:
 
-        - "0e+1e+2e" — full decomposition (9 components).
-        - "0e+2e" — symmetric part only (6 components).
-        - "2e" — traceless symmetric only (5 components).
-        - "1e" — antisymmetric part only (3 components).
+        - ``"isotropic"`` / ``"0e"``          (1 component)
+        - ``"antisymmetric"`` / ``"1e"``      (3 components)
+        - ``"symmetric"`` / ``"0e+2e"``       (6 components)
+        - ``"full"`` / ``"0e+1e+2e"``         (9 components)
+        - any valid subset, e.g. ``"2e"``     (5 components)
 
     Attributes
     ----------
     n_components : int
-        Number of spherical components produced by `to_spherical`
-        (determined by ``irreps``).
-    formula : str
-        The symmetry formula passed to the constructor.
+        Number of spherical components produced by `to_spherical`.
     irreps : e3nn.o3.Irreps
-        The selected irreducible representations.
+        The irreducible representations in the output.
 
     Examples
     --------
@@ -85,14 +87,14 @@ class CartesianTensorConverter:
 
     .. code-block:: python
 
-        converter_ms = CartesianTensorConverter(formula="ij=ji")
+        converter_ms = CartesianTensorConverter("full")
         sph = converter_ms.to_spherical(T)  # shape (..., 9)
 
     Electric field gradient — traceless symmetric tensor (5 components):
 
     .. code-block:: python
 
-        converter_efg = CartesianTensorConverter(formula="ij=ji", irreps="2e")
+        converter_efg = CartesianTensorConverter("2e")
         sph = converter_efg.to_spherical(T)  # shape (..., 5)
 
     Pre-process an :class:`ase.Atoms` trajectory before training:
@@ -102,22 +104,20 @@ class CartesianTensorConverter:
         import ase.io
         from graph_pes.data.transforms import CartesianTensorConverter
 
-        converter = CartesianTensorConverter(formula="ij=ji", irreps="2e")
+        converter = CartesianTensorConverter("2e")
         structures = ase.io.read("trajectory.xyz", index=":")
         for atoms in structures:
             converter.atoms_to_spherical(atoms, key="efg")
         ase.io.write("trajectory_sph.xyz", structures)
     """
 
-    def __init__(self, formula: str = "ij=ji", irreps: str = "0e+1e+2e"):
+    def __init__(self, irreps: str = "full"):
         from e3nn import o3
-        
-        lhs, rhs = formula.split("=")
-        antisymm_formula = f"{lhs}=-{rhs.lstrip('-')}"
-        indices = {i: "1o" for i in lhs.replace("-", "")}
 
-        rtp_symm = o3.ReducedTensorProducts(formula, **indices)
-        rtp_anti = o3.ReducedTensorProducts(antisymm_formula, **indices)
+        irreps_str = _KEYWORD_TO_IRREPS.get(irreps, irreps)
+
+        rtp_symm = o3.ReducedTensorProducts("ij=ji", i="1o", j="1o")
+        rtp_anti = o3.ReducedTensorProducts("ij=-ji", i="1o", j="1o")
 
         Q_symm = rtp_symm.change_of_basis.flatten(-2)  # (n_symm, 9)
         Q_anti = rtp_anti.change_of_basis.flatten(-2)   # (n_anti, 9)
@@ -129,7 +129,7 @@ class CartesianTensorConverter:
             [Q_symm[:first_dim], Q_anti, Q_symm[first_dim:]], dim=0
         )  # (9, 9)
 
-        # Map irrep label to its row indices in Q_full
+        # map irrep label → row indices in Q_full
         irrep_to_rows: dict[str, list[int]] = {}
         row = 0
         for mul_ir in [symm_list[0]] + anti_list + symm_list[1:]:
@@ -138,24 +138,24 @@ class CartesianTensorConverter:
             irrep_to_rows.setdefault(key, []).extend(range(row, row + dim))
             row += dim
 
-        requested_irreps = o3.Irreps(irreps)
+        requested_irreps = o3.Irreps(irreps_str)
         selected: list[int] = []
         for mul_ir in requested_irreps:
             ir_str = str(mul_ir.ir)
             if ir_str not in irrep_to_rows:
                 raise ValueError(
-                    f"Irrep '{ir_str}' is not part of the decomposition of "
-                    f"'{formula}'. Available: {sorted(irrep_to_rows)}"
+                    f"Irrep '{ir_str}' is not valid for a rank-2 tensor. "
+                    f"Available: {sorted(irrep_to_rows)}"
                 )
             if mul_ir.mul != 1:
                 raise ValueError(
-                    f"Multiplicity must be 1 for each irrep; got {mul_ir.mul}x{ir_str}"
+                    f"Multiplicity must be 1 for each irrep; "
+                    f"got {mul_ir.mul}x{ir_str}"
                 )
             selected.extend(irrep_to_rows[ir_str])
 
         self._Q = Q_full[selected]  # (n_components, 9)
-        self.formula = formula
-        self.irreps = o3.Irreps(irreps)
+        self.irreps = o3.Irreps(irreps_str)
         self.n_components: int = len(selected)
 
     def to_spherical(self, cartesian: torch.Tensor) -> torch.Tensor:
@@ -171,8 +171,7 @@ class CartesianTensorConverter:
         Returns
         -------
         torch.Tensor
-            Spherical representation of shape (..., n_components), where
-            n_components determined by irreps argument passed.
+            Spherical representation of shape (..., n_components).
         """
         Q = self._Q.to(device=cartesian.device, dtype=cartesian.dtype)
         return cartesian.flatten(-2) @ Q.T
@@ -180,6 +179,9 @@ class CartesianTensorConverter:
     def to_cartesian(self, spherical: torch.Tensor) -> torch.Tensor:
         """
         Convert per-atom spherical tensors back to Cartesian representation.
+
+        When only a subset of irreps is used, the result is the
+        projection of the full tensor onto those components only.
 
         Parameters
         ----------
