@@ -13,6 +13,7 @@ Fix Ruff formatting issues in graph_pes/torch_sim.py
 ## [0.2.5] - 2025-12-02
 
 Added atomic tensor models for NequIP and MACE
+Update documentation for atomic models
 
 ## [0.2.4] - 2025-11-12
 
