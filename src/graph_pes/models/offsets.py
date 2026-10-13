@@ -3,7 +3,7 @@ from __future__ import annotations
 import warnings
 
 import torch
-from ase.data import atomic_numbers
+from ase.data import atomic_numbers, chemical_symbols
 
 from graph_pes.atomic_graph import AtomicGraph, PropertyKey
 from graph_pes.graph_pes_model import GraphPESModel
@@ -262,12 +262,17 @@ class LearnableTensorOffset(TensorOffset):
     >>> model.pre_fit_all_components(training_data)
     """
 
-    def __init__(self, length: int, **initial_values: float):
+    def __init__(self, length: int, **initial_values: float | list[float]):
         offsets = PerElementParameter.of_length(
-            # **initial_values,
             length,
+            default_value=0.0,
             requires_grad=True,
         )
+        with torch.no_grad():
+            for symbol, value in initial_values.items():
+                if symbol not in chemical_symbols:
+                    raise ValueError(f"Unknown element: {symbol}")
+                offsets[atomic_numbers[symbol]] = torch.tensor(value)
 
         super().__init__(offsets)
 

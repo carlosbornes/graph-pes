@@ -7,7 +7,7 @@ from ase import Atoms
 
 from graph_pes import AtomicGraph
 from graph_pes.atomic_graph import number_of_atoms, to_batch
-from graph_pes.models.offsets import EnergyOffset, FixedOffset, LearnableOffset
+from graph_pes.models.offsets import EnergyOffset, FixedOffset, LearnableOffset, LearnableTensorOffset
 from graph_pes.utils.nn import count_used_parameters
 
 from .. import helpers
@@ -99,3 +99,22 @@ def test_energy_offset_fitting():
         match="No energy labels found in the training data",
     ):
         model.pre_fit_all_components([graph])
+
+
+def test_tensor_offset_fitting():
+    atoms = Atoms("HHCC")
+    atoms.arrays["tensor"] = np.array([[1.0, 2], [1, 2], [3, 4], [3, 4]])
+    graph = AtomicGraph.from_ase(atoms, cutoff=1.5)
+
+    # initial values are used, not overwritten by pre-fitting
+    model = LearnableTensorOffset(length=2, H=[5.0, 6.0])
+    assert model._offsets[1].tolist() == [5.0, 6.0]
+    # if element not specified start zero
+    assert model._offsets[6].tolist() == [0.0, 0.0]
+
+    model.pre_fit_all_components([graph])
+    assert model._offsets[1].tolist() == [5.0, 6.0]
+    assert model._offsets[6].tolist() == pytest.approx([3.0, 4.0], abs=1e-3)
+
+    with pytest.raises(ValueError, match="Unknown element"):
+        LearnableTensorOffset(length=2, Xx=[0.0, 0.0])
