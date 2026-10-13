@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-22
+
+Correct citation metadata to match the JOSS paper, including the title, authors, affiliations, licence and repository URL.
+
+## [1.0.1] - 2026-09-22
+
+Apply the training seed and dtype before model initialization for reproducible training.
+
+Document how to get help with usage questions and troubleshooting.
+
+Fix MatterSim CI by using Python 3.10 and explicitly selecting CPU devices in interface tests.
+
 ## [1.0.0] - 2026-05-07
 Fix Ruff formatting issues in graph_pes/torch_sim.py
 

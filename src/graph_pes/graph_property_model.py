@@ -49,7 +49,7 @@ class GraphPropertyModel(nn.Module, ABC):
     ):
         super().__init__()
 
-        self._GRAPH_PES_VERSION: Final[str] = "1.0.0"
+        self._GRAPH_PES_VERSION: Final[str] = "1.0.2"
 
         self.cutoff: torch.Tensor
         self.register_buffer("cutoff", torch.tensor(cutoff))

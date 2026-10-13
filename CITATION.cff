@@ -1,11 +1,18 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
+type: software
 authors:
   - family-names: "Gardner"
-    given-names: "John"
+    given-names: "John L. A."
     orcid: "https://orcid.org/0009-0006-7377-7146"
-title: "graph-pes: train and use graph-based ML models of potential energy surfaces"
-version: 1.0.0
+    affiliation: "Department of Chemistry, University of Oxford, Oxford, United Kingdom"
+  - family-names: "Deringer"
+    given-names: "Volker L."
+    orcid: "https://orcid.org/0000-0001-6873-0278"
+    affiliation: "Department of Chemistry, University of Oxford, Oxford, United Kingdom"
+title: "graph-pes: graph-based machine-learning models for potential-energy surfaces"
+license: MIT
+version: 1.0.2
 doi: 10.5281/zenodo.14956210
-date-released: 2024-07-01
-url: "https://github.com/jla-gardner/graph-pes"
+date-released: 2026-09-22
+url: "https://github.com/vldgroup/graph-pes"
